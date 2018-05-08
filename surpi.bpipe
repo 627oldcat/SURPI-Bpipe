@@ -1,0 +1,561 @@
+load "surpi.config"
+
+setup = {
+
+input_fastq = input
+basename = input.replaceAll(/.*\//,"").prefix
+
+}
+
+fastq_validate = {
+
+   def output_dir = "output/00-validate"
+   def output_file = output_dir + "/quality." + basename + ".log"
+   produce (output_file)
+
+   {
+
+   output.dir = output_dir
+
+   exec """
+   
+   fastQValidator --file $input --printBaseComp --avgQual > ${output_file}
+
+   ""","fastq_validate"
+
+    }
+}
+
+preprocess = {
+
+   def THREADS = 24
+   def output_dir = "output/01-preprocess"
+   def output_file = output_dir + "/" + basename + ".preprocessed.fastq"
+   def log_file = basename + ".preprocess.log"
+   produce (output_file)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $output_dir;
+preprocess_ncores.sh $input S N $LENGTH_CUTOFF $THREADS Y N $ADAPTER_SET $START_NT $CROP_LENGTH $TMP_DIR > $log_file;
+
+""","preprocess"
+}
+}
+
+subtract_human = {
+
+   def THREADS = 24
+   def output_dir = "output/02-subtract"
+   def sam_file = output_dir + "/" + basename + ".human.snap.unmatched.sam"
+   def output_file = output_dir + "/" + basename + ".human.snap.unmatched.fastq"
+   produce (output_file)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cp $input /dev/shm/tmp.fastq;
+snap-aligner single $SNAP_SUBTRACTION_DB /dev/shm/tmp.fastq -o ${sam_file} -t $THREADS -x -f -h 250 -d $HUMAN_EDIT_DIST -n 25 -F u;
+egrep -v "^@" ${sam_file} | awk '{if(\$3 == "*") print "@"\$1"\\n"\$10"\\n""+"\$1"\\n"\$11}' > $output_file;
+rm /dev/shm/tmp.fastq
+
+""","subtract_human"
+}
+}
+
+snap_nt = {
+
+   def THREADS = 24
+   def id = chr.replaceAll("chr","")
+   def output_dir = "output/03-snap-nt"
+   def align_file = output_dir + "/" + basename + ".NT." + id + ".snap.sam"
+   def output_file = output_dir + "/" + basename + ".NT." + id + ".snap.noheader.sam"
+   def SNAP_DB = SNAP_NT_DB + id
+   produce (output_file)
+
+{
+
+output.dir = output_dir
+
+exec """
+cp $input /dev/shm/tmp.fastq;
+snap-aligner single $SNAP_DB /dev/shm/tmp.fastq -o $align_file -t $THREADS -x -f -h 250 -d $SNAP_CUTOFF -n 25;
+sed '/^@/d' $align_file | sort -S80% > $output_file;
+
+rm /dev/shm/tmp.fastq
+
+""","snap_nt"
+}
+}
+
+merge_sam = {
+
+   def THREADS = 24
+   def input_dir = input.replaceAll(/[^\/]*$/,"")
+   def cutadapt_dir = "output/01-preprocess"
+   def cutadapt_file = basename + ".cutadapt.fastq"
+   def output_dir = "output/04-merge-nt"
+   def output_file = output_dir + "/" + basename + ".NT.snap.sam"
+   def output_unmatched_sam = basename + ".NT.snap.unmatched.sam"
+   def output_matched_sam = basename + ".NT.snap.matched.sam"
+   def output_matched_sam_sorted = basename + ".NT.snap.matched.sorted.sam"
+   def output_tmp1 = output_matched_sam_sorted + ".tmp1"
+   def output_tmp2 = output_matched_sam_sorted + ".tmp2"
+   def output_unmatched_fastq = basename + ".NT.snap.unmatched.fulllength.fastq"
+   def output_matched_fastq = basename + ".NT.snap.matched.fulllength.fastq"
+   def output_sequence = basename + ".NT.snap.matched.fulllength.sequence.txt"
+   def output_fulllength_sam = basename + ".NT.snap.matched.fulllength.sam"
+   def final_output = output_dir + "/" + output_fulllength_sam
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+filelist=`ls ${input_dir}*.snap.noheader.sam`;
+echo $filelist;
+compare_multiple_sam.py \$filelist $output_file;
+egrep -v "^@" $output_file | awk '{if(\$3 != "*") print }' > $output_dir/$output_matched_sam;
+egrep -v "^@" $output_file | awk '{if(\$3 == "*") print }' > $output_dir/$output_unmatched_sam;
+cp ${cutadapt_dir}/${cutadapt_file} ${output_dir}/${cutadapt_file};
+cd $output_dir;
+extractHeaderFromFastq_ncores.sh $THREADS $cutadapt_file $output_matched_sam $output_matched_fastq $output_unmatched_sam $output_unmatched_fastq;
+sort -k1,1 $output_matched_sam  > $output_matched_sam_sorted;
+cut -f1-9 $output_matched_sam_sorted > $output_tmp1;
+cut -f12- $output_matched_sam_sorted > $output_tmp2;
+awk '(NR%4==1) {printf("%s\\t",\$0)} (NR%4==2) {printf("%s\\t", \$0)} (NR%4==0) {printf("%s\\n",\$0)}' $output_matched_fastq | sort -T ./ -k1,1 | awk '{print \$2 "\\t" \$3}' > $output_sequence;
+paste ${output_matched_sam_sorted}.tmp1 $output_sequence ${output_matched_sam_sorted}.tmp2 > $output_fulllength_sam
+
+""","merge_sam"
+}
+}
+
+taxonomy_nt = {
+
+   def THREADS = 24
+   def input_dir = "output/04-merge-nt"
+   def input_file = basename + ".NT.snap.matched.fulllength.sam"
+   def output_dir = "output/05-taxonomy-nt"
+   def tmpfile = output_dir + "/" + basename + ".NT.snap.matched.fulllength.sam.gi"
+   def final_output = output_dir + "/" + basename + ".NT.snap.matched.fulllength.all.annotated.sorted"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cp ${input_dir}/${input_file} ${output_dir}/${input_file};
+cd $output_dir;
+python trans_acc2gi.py $input_file $TRANS_ACC2GI $tmp_file;
+taxonomy_lookup.pl $tmp_file sam nucl $THREADS $TAXONOMY_DB;
+sort -k 13.7n ${basename}.NT.snap.matched.fulllength.all.annotated > ${basename}.NT.snap.matched.fulllength.all.annotated.sorted;
+
+""","taxonomy_nt"
+
+}
+}
+
+taxonomy_nt_2 = {
+
+   def THREADS = 24
+   def output_dir = "output/05-taxonomy-nt"
+   def final_output = output_dir + "/" + basename + ".NT.snap.matched.fl.nonChordatEuk.annotated"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $output_dir;
+grep "Viruses;" ${basename}.NT.snap.matched.fulllength.all.annotated.sorted > "${basename}.NT.snap.matched.fl.Viruses.annotated";
+grep "Bacteria;" ${basename}.NT.snap.matched.fulllength.all.annotated.sorted > "${basename}.NT.snap.matched.fl.Bacteria.annotated";
+grep "Primates;" ${basename}.NT.snap.matched.fulllength.all.annotated.sorted > "${basename}.NT.snap.matched.fl.Primates.annotated";
+grep -v "Primates" ${basename}.NT.snap.matched.fulllength.all.annotated.sorted | grep "Mammalia" > "${basename}.NT.snap.matched.fl.nonPrimMammal.annotated";
+grep -v "Mammalia" ${basename}.NT.snap.matched.fulllength.all.annotated.sorted | grep "Chordata" > "${basename}.NT.snap.matched.fl.nonMammalChordat.annotated";
+grep -v "Chordata" ${basename}.NT.snap.matched.fulllength.all.annotated.sorted | grep "Eukaryota" > "${basename}.NT.snap.matched.fl.nonChordatEuk.annotated";
+
+"""
+
+}
+}
+
+taxonomy_nt_viral = {
+
+   def THREADS = 24
+   def input_file = basename + ".NT.snap.matched.fl.Viruses.annotated"
+   def output_dir = "output/05-taxonomy-nt"
+   def final_output = output_dir + "/" + basename + ".NT.snap.matched.fl.Viruses.annotated.species.counttable"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $output_dir;
+table_generator_parallel.sh $input_file SNAP Y Y Y Y
+
+"""
+
+}
+}
+
+taxonomy_nt_bac = {
+
+   def THREADS = 24
+   def input_file = basename + ".NT.snap.matched.fl.Bacteria.annotated"
+   def output_dir = "output/05-taxonomy-nt"
+   def final_output = output_dir + "/" + basename + ".NT.snap.matched.fl.Bacteria.annotated.noRibo.annotated.species.counttable"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $output_dir;
+ribo_snap_bac_euk.sh $input_file BAC $THREADS $RIBO_SNAP_DB;
+
+"""
+
+}
+}
+
+taxonomy_nt_euk = {
+
+   def THREADS = 24
+   def input_file = basename + ".NT.snap.matched.fl.nonChordatEuk.annotated"
+   def output_dir = "output/05-taxonomy-nt"
+   def final_output = output_dir + "/" + basename + ".NT.snap.matched.fl.nonChordatEuk.annotated.noRibo.annotated.species.counttable"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $output_dir;
+ribo_snap_bac_euk.sh $input_file EUK $THREADS $RIBO_SNAP_DB
+
+"""
+
+}
+}
+
+sort_unique = {
+
+   def THREADS = 24
+   def input_dir = "output/05-taxonomy-nt"
+   def input_file = input_dir + "/" + basename + ".NT.snap.matched.fulllength.all.annotated.sorted"
+   def input2_dir = "output/04-merge-nt"
+   def input2_file = input2_dir + "/" + basename + ".NT.snap.unmatched.fulllength.fastq"
+   def output_dir = "output/06-sort-unique"
+   def final_output = output_dir + "/" + basename + ".NT.snap.unmatched.fulllength.fasta"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+grep "Viruses;" $input_file | egrep -v "^@" | awk '{if(\$3 != "*") print "@"\$1"\\n"\$10"\\n""+"\$1"\\n"\$11}' > ${output_dir}/${basename}.NT.snap.matched.fl.Viruses.annotated.fastq;
+
+sed "n;n;n;d" $input2_file | sed "n;n;d" | sed "s/^@/>/g" > ${output_dir}/${basename}.NT.snap.unmatched.fulllength.fasta;
+
+cat ${output_dir}/${basename}.NT.snap.unmatched.fulllength.fasta | perl -e 'while (<>) {$h=$_; $s=<>; $seqs{$h}=$s;} foreach $header (reverse sort {length($seqs{$a}) <=> length($seqs{$b})} keys %seqs) {print $header.$seqs{$header}}' > ${output_dir}/${basename}.NT.snap.unmatched.fulllength.sorted.fasta;
+crop_reads.csh ${output_dir}/${basename}.NT.snap.unmatched.fulllength.sorted.fasta 25 50 > ${output_dir}/${basename}.NT.snap.unmatched.fulllength.sorted.cropped.fasta;
+
+gt sequniq -seqit -force -o ${output_dir}/${basename}.NT.snap.unmatched.fulllength.sorted.cropped.uniq.fasta ${output_dir}/${basename}.NT.snap.unmatched.fulllength.sorted.cropped.fasta;
+extractAlltoFast.sh ${output_dir}/${basename}.NT.snap.unmatched.fulllength.sorted.cropped.uniq.fasta FASTA ${output_dir}/${basename}.NT.snap.unmatched.fulllength.fasta FASTA ${output_dir}/${basename}.NT.snap.unmatched.uniq.fl.fasta FASTA;
+
+"""
+}
+}
+
+assembly = {
+
+   def THREADS = 24
+   def input_dir = "output/06-sort-unique"
+   def input_file = input_dir + "/" + basename + ".NT.snap.matched.fl.Viruses.annotated"
+   def output_dir = "output/07-assembly"
+   def final_output = output_dir + "/" + "all." + basename + ".NT.snap.unmatched_addVir_uniq.fasta.unitigs.cut100.175-mini.fa"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+sed "n;n;n;d" ${input_dir}/${basename}.NT.snap.matched.fl.Viruses.annotated.fastq | sed "n;n;d" | sed "s/^@/>/g" | sed 's/>/>Vir/g' > ${output_dir}/${basename}.NT.snap.matched.fl.Viruses.fasta;
+gt sequniq -seqit -force -o ${output_dir}/${basename}.NT.snap.matched.fl.Viruses.uniq.fasta ${output_dir}/${basename}.NT.snap.matched.fl.Viruses.fasta;
+cat ${input_dir}/${basename}.NT.snap.unmatched.uniq.fl.fasta ${output_dir}/${basename}.NT.snap.matched.fl.Viruses.uniq.fasta > ${output_dir}/${basename}.NT.snap.unmatched_addVir_uniq.fasta;
+cd $output_dir;
+abyss_minimus.sh ${basename}.NT.snap.unmatched_addVir_uniq.fasta $ABYSS_LENGTH $CONTIG_CUTOFF $THREADS 34
+
+"""
+}
+}
+
+search_viral = {
+
+   def THREADS = 24
+   def input_dir = "output/06-sort-unique"
+   def input_file = input_dir + "/" + basename + ".NT.snap.unmatched.uniq.fl.fasta"
+   def output_dir = "output/08-search-viral"
+   def final_output = output_dir + "/" + basename + ".Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+ac-diamond blastx -q $input_file -d $AC_DIAMOND_VIRAL -a ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL} -p $THREADS -t /dev/shm -c 1 -v;
+ac-diamond view -a ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.daa > ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.m8;
+sed -i '/^#/d' ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.m8;
+seqtk subseq $input_file ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.m8 > ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta;
+
+"""
+}
+}
+
+taxonomy_viral = {
+
+   def THREADS = 24
+   def input_dir = "output/08-search-viral"
+   def input_file = input_dir + "/" + basename + "Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta"
+   def output_dir = "output/08-search-viral"
+   def final_output = output_dir + "/" + basename + ".Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.species.counttable"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+sed '/>/d' ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta > ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta.seq;
+paste ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.m8 ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta.seq > ${output_dir}/${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.addseq.m8;
+
+cd $output_dir;
+taxonomy_lookup.pl ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.addseq.m8 blast prot $THREADS $TAXONOMY_DB;
+mv ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.addseq.all.annotated ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated;
+table_generator_parallel.sh ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated RAP N Y N N
+
+"""
+}
+}
+
+search_nr_parallel = {
+
+   def THREADS = 24
+   def id = chr.replaceAll("chr","")
+   def output_dir = "output/09-search-nr"
+   def output_file = output_dir + "/" + basename + ".Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.${id}.sorted.m8"
+   produce (output_file)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+ac-diamond blastx -q ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.uniq.fasta -d ${AC_DIAMOND_NR_SPLIT}.${id}.dmnd -a ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.${id} -p $THREADS -t /dev/shm -k 1 -c 1 -v;
+ac-diamond view -a ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.${id}.daa > ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.${id}.m8;
+
+sed -i '/^#/d' ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.${id}.m8;
+sort_m8.py ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.uniq.fasta.header ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.${id}.m8 ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.${id}.sorted.m8
+
+""","search_nr_parallel"
+}
+}
+
+search_nr = {
+
+   def THREADS = 24
+   def input_dir = "output/08-search-viral"
+   def input_file = input_dir + "/" + basename + ".Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta"
+   def input_dir2 = "output/07-assembly"
+   def input_file2 = input_dir2 + "/" + "all." + basename + ".NT.snap.unmatched_addVir_uniq.fasta.unitigs.cut${ABYSS_LENGTH}.${CONTIG_CUTOFF}-mini.fa"
+   def output_dir = "output/09-search-nr"
+   def final_output = output_dir + "/" + basename + ".Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.uniq.fasta"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cat $input_file $input_file2 > ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta;
+gt sequniq ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.fasta > ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.uniq.fasta;
+grep '>' ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.uniq.fasta | sed 's/^>//g' > ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.uniq.fasta.header
+
+"""
+}
+}
+
+search_nr_merge = {
+
+   def THREADS = 24
+   def input_dir = "output/08-search-viral"
+   def input_file = input_dir + "/" + basename + ".Viral.Diamond.e${ECUTOFF_VIRAL}.annotated"
+   def output_dir = "output/09-search-nr"
+   def output_file = output_dir + "/" + basename + ".Contigs.NR.Diamond.e${ECUTOFF_NR}.annotated"
+   produce (output_file)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+filelist=`ls ${output_dir}/*sorted.m8`;
+echo $filelist;
+compare_multiple_m8.py \$filelist ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.merged.m8;
+
+grep -v "*" ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.merged.m8 > ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.m8;
+sed -i '/^#/d' ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.m8;
+
+seqtk subseq ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.m8.uniq.fasta ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.m8  > ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.m8.fasta;
+
+cat ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.m8.fasta | awk '{if (substr(\$0,1,1)==">"){if (p){print "\\n";} print \$0} else printf("%s",\$0);p++;}END{print "\\n"}' | sed '/^\$/d' | sed '/>/d' > ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.m8.fasta.seq;
+
+paste ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.m8 ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.m8.fasta.seq > ${output_dir}/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.addseq.m8;
+
+cp $input_file $output_dir;
+cd $output_dir;
+
+taxonomy_lookup.pl ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.addseq.m8 blast prot $THREADS $TAXONOMY_DB;
+
+cp ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.addseq.all.annotated ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.annotated;
+
+grep "Viruses" ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.annotated > ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.Viruses.annotated;
+egrep "^contig" ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.annotated > ${basename}.Contigs.NR.Diamond.e${ECUTOFF_NR}.annotated;
+
+""","search_nr_merge"
+}
+}
+
+taxonomy_nr = {
+
+   def THREADS = 24
+   def input_dir = "output/09-search-nr"
+   def output_dir = "output/09-search-nr"
+   def final_output = output_dir + "/" + basename + ".Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.Viruses.annotated.species.counttable"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $input_dir;
+table_generator_parallel.sh ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.Viruses.annotated RAP Y Y Y Y;
+
+"""
+
+}
+}
+
+taxonomy_nr2 = {
+
+   def THREADS = 24
+   def input_dir = "output/09-search-nr"
+   def output_dir = "output/09-search-nr"
+   def final_output = output_dir + "/" + basename + ".Contigs.NR.Diamond.e${ECUTOFF_NR}.annotated.species.counttable"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $input_dir;
+table_generator_parallel.sh ${basename}.Contigs.NR.Diamond.e${ECUTOFF_NR}.annotated RAP Y Y Y Y;
+
+"""
+
+}
+}
+
+taxonomy_nr3 = {
+
+   def THREADS = 24
+   def input_dir = "output/09-search-nr"
+   def output_dir = "output/09-search-nr"
+   def final_output = output_dir + "/" + basename + ".Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.not.in.NR.annotated.species.counttable"
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $input_dir;
+sed 's/@//g' ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.Viruses.annotated > ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.Viruses.annotated.bar.inc;
+awk '{print \$1}' ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated > ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.header;
+awk '{print \$1}' ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.annotated > ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.annotated.header;
+
+sort ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.header ${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.annotated.header | uniq -d | sort ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.header - | uniq -u > ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.not.in.NR.header;
+
+split -l 400 -a 6 ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.not.in.NR.header ${basename}.not.in.NR.;
+for f in ${basename}.not.in.NR.[a-z][a-z][a-z][a-z][a-z][a-z];
+do grep -f "\$f" ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated > \$f.annotated & done;
+
+for job in `jobs -p`; do wait $job; done;
+
+cat ${basename}.not.in.NR.[a-z][a-z][a-z][a-z][a-z][a-z].annotated > ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.not.in.NR.annotated;
+rm -r ${basename}.not.in.NR.[a-z][a-z][a-z][a-z][a-z][a-z];
+rm -r ${basename}.not.in.NR.[a-z][a-z][a-z][a-z][a-z][a-z].annotated;
+
+table_generator_parallel.sh ${basename}.Viral.Diamond.e${ECUTOFF_VIRAL}.annotated.not.in.NR.annotated RAP N Y N N
+
+"""
+
+}
+}
+
+readcount = {
+
+   def output_dir = "output/10-readcount"
+   def final_output = output_dir + "/readcounts." + basename + ".log" 
+   produce (final_output)
+
+{
+
+output.dir = output_dir
+
+exec """
+
+cd $output_dir;
+headerid=\$(head -1 $input_fastq | cut -c1-4 | sed 's/@//g');
+readcount.sh ${basename} $headerid Y $input_fastq ../01-preprocess/${basename}.preprocessed.fastq ../02-subtract/${basename}.preprocessed.s20.h250n25d12xfu.human.snap.unmatched.fastq ../05-taxonomy-nt/${basename}.NT.snap.matched.fulllength.all.annotated.sorted ../05-taxonomy-nt/${basename}.NT.snap.matched.fl.Viruses.annotated ../05-taxonomy-nt/${basename}.NT.snap.matched.fl.Bacteria.annotated ../05-taxonomy-nt/${basename}.NT.snap.matched.fl.nonChordatEuk.annotated ../04-merge-nt/${basename}.NT.snap.unmatched.sam ../09-search-nr/${basename}.Contigs.and.NTunmatched.Viral.Diamond.e${ECUTOFF_VIRAL}.NR.e${ECUTOFF_NR}.Viruses.annotated
+
+"""
+}
+}
+
+run { [ setup + [fastq_validate, preprocess + subtract_human + chr(1..30) * [ snap_nt] + merge_sam + taxonomy_nt + [taxonomy_nt_2 + [taxonomy_nt_viral,taxonomy_nt_bac,taxonomy_nt_euk],sort_unique] + [assembly,search_viral] + [taxonomy_viral,search_nr + chr(1..20) * [search_nr_parallel] + search_nr_merge + [taxonomy_nr,taxonomy_nr2,taxonomy_nr3] + readcount]]] }
