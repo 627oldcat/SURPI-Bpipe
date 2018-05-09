@@ -1,1 +1,0 @@
-/home/users/nus/bchbhkk/bin/bpipe-0.9.9.2/bin/bpipe run -n 1024 -r surpi.bpipe /input/SRR1106123.fastq

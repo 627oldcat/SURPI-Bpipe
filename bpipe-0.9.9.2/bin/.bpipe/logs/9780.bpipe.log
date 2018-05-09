@@ -1,5 +1,0 @@
-bpipe.Runner	[1]	INFO	|10:41:17 Starting 
-bpipe.Runner	[1]	INFO	|10:41:18 OS: Linux (2.6.32-696.16.1.el6.x86_64) Java: 1.7.0_161 Vendor: Oracle Corporation 
-bpipe.Runner	[1]	INFO	|10:41:18 Initializing plugins ... 
-bpipe.Config	[1]	INFO	|10:41:18 No plugins directory found: /home/projects/11000727/bin/bpipe-0.9.9.2/bin/.bpipe/plugins 
-bpipe.Runner	[9]	INFO	|10:41:18 Deleting job file /home/users/nus/e0056351/.bpipedb/jobs/9780 
