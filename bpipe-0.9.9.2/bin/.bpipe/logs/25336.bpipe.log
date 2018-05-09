@@ -1,0 +1,4 @@
+bpipe.Runner	[1]	INFO	|1:46:26 Starting 
+bpipe.Runner	[1]	INFO	|1:46:26 OS: Linux (2.6.32-642.11.1.el6.x86_64) Java: 1.7.0_121 Vendor: Oracle Corporation 
+bpipe.Runner	[1]	INFO	|1:46:26 Initializing plugins ... 
+bpipe.Config	[1]	INFO	|1:46:26 No plugins directory found: /home/users/nus/bchbhkk/bin/bpipe-0.9.9.2/bin/.bpipe/plugins 

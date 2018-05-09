@@ -1,0 +1,11 @@
+bpipe.Runner	[1]	INFO	|12:00:43 Starting 
+bpipe.Runner	[1]	INFO	|12:00:43 OS: Linux (2.6.32-642.11.1.el6.x86_64) Java: 1.7.0_121 Vendor: Oracle Corporation 
+bpipe.Runner	[1]	INFO	|12:00:43 Initializing plugins ... 
+bpipe.Config	[1]	INFO	|12:00:43 No plugins directory found: /home/users/nus/bchbhkk/bin/bpipe-0.9.9.2/bin/.bpipe/plugins 
+bpipe.Runner	[1]	INFO	|12:00:43 Reading user config ...  
+bpipe.Config	[1]	INFO	|12:00:43 No configuration file found in same dir as pipeline file /home/users/nus/bchbhkk/bin/bpipe-0.9.9.2/bin/bpipe.config 
+bpipe.Config	[1]	INFO	|12:00:43 No local configuration file found 
+bpipe.Utils	[11]	INFO	|12:00:44 Read config from /home/users/nus/bchbhkk/bin/bpipe-0.9.9.2/bin/../bpipe.config executed in 0.218 seconds 
+bpipe.Utils	[1]	INFO	|12:00:44 Read user config executed in 0.414 seconds 
+bpipe.Runner	[1]	INFO	|12:00:44 Maximum threads specified as 1024 
+bpipe.Runner	[9]	INFO	|12:00:44 Deleting job file /home/users/nus/bchbhkk/.bpipedb/jobs/9991 
